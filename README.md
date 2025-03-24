@@ -1,7 +1,7 @@
 
 # DJI Tello EDU with ROS2
 
-This repository contains ROS2 nodes developed to control DJI Tello drones.
+This repository contains ROS2 nodes for Finite-State-Machine formation flying of DJI Tello drones.
 
 ## Project Overview
 
