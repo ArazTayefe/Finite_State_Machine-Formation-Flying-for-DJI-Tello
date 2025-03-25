@@ -6,15 +6,18 @@ from djitellopy import Tello
 import threading
 import time
 import cv2
+import logging
+from std_msgs.msg import Bool
 
 class TelloCommunicationNode(Node):
     def __init__(self):
         super().__init__('tello_communication_node')
         self.drones = {
-            'Alpha': Tello('192.168.10.95'),
-            'Bravo': Tello('192.168.10.97'),
-            'Charlie': Tello('192.168.10.204')
+            'Alpha': Tello('10.42.0.95'),
+            'Bravo': Tello('10.42.0.97'),
+            'Charlie': Tello('10.42.0.204')
         }
+        # self.drones = {'Alpha': Tello('10.42.0.95')}
         self.bridge = CvBridge()
         self.initialize_drones()
 
@@ -25,8 +28,14 @@ class TelloCommunicationNode(Node):
                 self.create_subscription(Float64, topic_name, 
                                          self.create_velocity_callback(drone_name, axis), 10)
 
+        for drone_name in self.drones:
+            land_topic = f'{drone_name}_land'
+            self.get_logger().info(f'Subscribing to topic: {land_topic}')
+            self.create_subscription(Bool, land_topic, self.create_landing_callback(drone_name), 10)
+            
         rclpy.get_default_context().on_shutdown(self.on_shutdown)
         threading.Thread(target=self.shutdown_listener).start()
+        logging.getLogger('djitellopy').setLevel(logging.WARNING)
 
     def initialize_drones(self):
         threads = [threading.Thread(target=self.setup_drone, args=(drone_name,)) for drone_name in self.drones]
@@ -42,11 +51,11 @@ class TelloCommunicationNode(Node):
         drone.takeoff()
 
     def send_velocity_command(self, drone):
-        self.get_logger().info(f'Sending velocity command: vx={drone.rc_control_x}, vy={drone.rc_control_y}, vz={drone.rc_control_z}, yaw={drone.rc_control_yaw}')
+        #self.get_logger().info(f'Sending velocity command: vx={drone.rc_control_x}, vy={drone.rc_control_y}, vz={drone.rc_control_z}, yaw={drone.rc_control_yaw}')
         drone.send_rc_control(int(drone.rc_control_x), int(drone.rc_control_y), int(drone.rc_control_z), int(drone.rc_control_yaw))
 
     def handle_velocity(self, msg, drone_name, axis):
-        self.get_logger().info(f'Received velocity message: {msg.data} for drone: {drone_name}, axis: {axis}')
+        #self.get_logger().info(f'Received velocity message: {msg.data} for drone: {drone_name}, axis: {axis}')
         drone = self.drones[drone_name]
 
         scale_factor = 100.0  # Scale the velocity commands to be within -100 to 100
@@ -72,6 +81,21 @@ class TelloCommunicationNode(Node):
             self.get_logger().info(f'Landing drone: {drone_name}')
             threading.Thread(target=drone.land).start()
 
+    def create_landing_callback(self, drone_name):
+        return lambda msg: self.handle_landing(msg, drone_name)
+
+    def handle_landing(self, msg, drone_name):
+        if msg.data:
+            drone = self.drones[drone_name]
+            self.get_logger().info(f"Landing command received for {drone_name}. Sending zero RC before landing.")
+            try:
+                drone.send_rc_control(0, 0, 0, 0)  # stop any current movement
+                time.sleep(1.5)  # small delay to make sure drone is idle
+                threading.Thread(target=drone.land).start()
+            except Exception as e:
+                self.get_logger().error(f"Failed to send landing command for {drone_name}: {e}")
+
+        
     def on_shutdown(self):
         self.get_logger().info('Shutting down node, landing all drones...')
         self.land_all_drones()
