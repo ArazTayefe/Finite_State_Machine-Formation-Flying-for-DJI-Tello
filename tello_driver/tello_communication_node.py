@@ -75,33 +75,55 @@ class TelloCommunicationNode(Node):
         return lambda msg: self.handle_velocity(msg, drone_name, axis)
 
     def land_all_drones(self):
-        self.get_logger().info('Landing all drones after 10 seconds...')
-        time.sleep(60)  # Wait for 60 seconds befo re landing
-        for drone_name, drone in self.drones.items():
-            self.get_logger().info(f'Landing drone: {drone_name}')
-            threading.Thread(target=drone.land).start()
+        self.get_logger().info('Landing all drones now...')
+        for drone_name in self.drones:
+            success = self.safe_land(drone_name)
+            if not success:
+                self.get_logger().warn(f"[{drone_name}] Manual intervention may be required.")
 
     def create_landing_callback(self, drone_name):
         return lambda msg: self.handle_landing(msg, drone_name)
 
     def handle_landing(self, msg, drone_name):
         if msg.data:
-            drone = self.drones[drone_name]
-            self.get_logger().info(f"Landing command received for {drone_name}. Sending zero RC before landing.")
-            try:
-                drone.send_rc_control(0, 0, 0, 0)  # stop any current movement
-                time.sleep(1.5)  # small delay to make sure drone is idle
-                threading.Thread(target=drone.land).start()
-            except Exception as e:
-                self.get_logger().error(f"Failed to send landing command for {drone_name}: {e}")
+            self.get_logger().info(f"[{drone_name}] Landing command received. Initiating safe landing...")
+            threading.Thread(target=self.safe_land, args=(drone_name,)).start()
 
-        
+    def safe_land(self, drone_name, max_retries=3):
+        drone = self.drones[drone_name]
+        self.get_logger().info(f"[{drone_name}] Initiating safe landing...")
+    
+        try:
+            # Step 1: Stabilize with rc 0 0 0 0
+            for _ in range(3):
+                drone.send_rc_control(0, 0, 0, 0)
+                time.sleep(0.3)
+    
+            # Step 2: Retry landing with exponential backoff
+            for i in range(max_retries):
+                try:
+                    self.get_logger().info(f"[{drone_name}] Sending land command (attempt {i+1})...")
+                    drone.land()
+                    self.get_logger().info(f"[{drone_name}] Landed successfully.")
+                    self.get_logger().info(f"[{drone_name}] Shutting down connection.")
+                    drone.end()
+                    return True
+    
+                except Exception as e:
+                    self.get_logger().warn(f"[{drone_name}] Land attempt {i+1} failed: {e}")
+                    time.sleep(1.5 * (i + 1))  # backoff
+    
+            self.get_logger().error(f"[{drone_name}] FAILED to land after {max_retries} attempts.")
+            return False
+    
+        except Exception as e:
+            self.get_logger().error(f"[{drone_name}] Exception in safe_land: {e}")
+            return False
+
     def on_shutdown(self):
         self.get_logger().info('Shutting down node, landing all drones...')
         self.land_all_drones()
-        time.sleep(13)  # Ensure there is enough time to land all drones
-        for drone in self.drones.values():
-            drone.end()  # This will close the control socket 8889
+        time.sleep(10)  # Ensure there is enough time to land all drones
         self.get_logger().info('All drones landed and sockets closed.')
 
     def shutdown_listener(self):
