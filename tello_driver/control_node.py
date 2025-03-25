@@ -274,6 +274,7 @@ class DisplacementGeneratorNode(Node):
                     self.get_logger().info("UAV altitude changed: starting rotating formation (phase 2).")
                     self.phase = 2
                     self.phase_start_time = current_time
+            
                 # # Check if each drone is close to its final XY position
                 # all_reached = True
                 # for drone in self.drones:
@@ -321,8 +322,11 @@ class DisplacementGeneratorNode(Node):
                 t_phase = current_time - self.phase_start_time
                 yaw = self.get_yaw_from_quaternion(UAV_orientation) - np.pi/2
                 base_angle = self.rotation_rate * t_phase
-                phase_offsets = {'Alpha': 0.0, 'Bravo': 2*np.pi/3, 'Charlie': 4*np.pi/3}
-                altitude_offsets = {'Alpha': 0.5, 'Bravo': 0.8, 'Charlie': 1.1}
+                phase_offsets = {'Alpha': 0.0,
+                            'Bravo': 3 * np.pi / 4,     # 135°
+                            'Charlie': -3 * np.pi / 4   # -135°
+                        }
+                altitude_offsets = {'Alpha': 0.45, 'Bravo': 0.6, 'Charlie': 0.75}
                 for drone in self.drones:
                     angle = base_angle + phase_offsets[drone]
                     offset_xy = np.array([self.triangle_radius * np.cos(angle),
