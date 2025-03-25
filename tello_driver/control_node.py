@@ -341,85 +341,77 @@ class DisplacementGeneratorNode(Node):
                     self.phase = 3
                     self.phase_start_time = current_time
 
-            elif self.phase == 3:
-                if not hasattr(self, 'landing_index'):
-                    self.landing_order = ['Alpha', 'Bravo', 'Charlie']
-                    self.landing_index = 0
-                    self.landing_subphase = 0  # 0 = wait before land
-                    self.phase_start_time = current_time
-                    self.get_logger().info("Phase 3 initiated: Sequential immediate landing starting.")
-
-                drone = self.landing_order[self.landing_index]
-
-                if self.landing_subphase == 0:
-                    self.get_logger().info(f"{drone} landing now.")
-                    self.send_landing_command(drone)
-                    self.landing_subphase = 1
-                    self.phase_start_time = current_time
-
-                elif self.landing_subphase == 1:
-                    # Wait 5 seconds before moving to next drone
-                    if current_time - self.phase_start_time > 5.0:
-                        self.landing_index += 1
-                        self.landing_subphase = 0
-                        self.phase_start_time = current_time
-
-                        if self.landing_index >= len(self.landing_order):
-                            self.get_logger().info("Phase 3 complete: All drones received landing command.")
-                            del self.landing_index
-                            del self.landing_order
-                            del self.landing_subphase
-                            self.phase += 1  # or stop here if this is the final phase
-
-
             # elif self.phase == 3:
             #     if not hasattr(self, 'landing_index'):
-            #         self.landing_order = ['Alpha', 'Bravo', 'Charlie']  # landing sequence
+            #         self.landing_order = ['Alpha', 'Bravo', 'Charlie']
             #         self.landing_index = 0
+            #         self.landing_subphase = 0  # 0 = wait before land
             #         self.phase_start_time = current_time
-            #         self.landing_subphase = 0  # 0 = XY motion, 1 = descend
-            #         self.get_logger().info("Phase 3 initiated: Sequential landing starting.")
+            #         self.get_logger().info("Phase 3 initiated: Sequential immediate landing starting.")
 
             #     drone = self.landing_order[self.landing_index]
-            #     target_xy = self.initial_positions[drone][:2]
-            #     current_pos = self.rigid_body_data[drone]
-            #     current_z = current_pos[2]
-            #     target_z = 0.1  # small height above ground
 
             #     if self.landing_subphase == 0:
-            #         # Move in XY only, maintain current Z
-            #         desired_pos = np.array([target_xy[0], target_xy[1], current_z])
-            #         self.desired_positions[drone] = desired_pos
-            #         self.desired_yaws[drone] = 0.0
-            #         xy_error = np.linalg.norm(current_pos[:2] - target_xy)
-
-            #         if xy_error < 0.1:
-            #             self.get_logger().info(f"{drone} reached XY target, starting descent.")
-            #             self.landing_subphase = 1
-            #             self.phase_start_time = current_time
+            #         self.get_logger().info(f"{drone} landing now.")
+            #         self.send_landing_command(drone)
+            #         self.landing_subphase = 1
+            #         self.phase_start_time = current_time
 
             #     elif self.landing_subphase == 1:
-            #         # Descend in Z only, keep XY fixed
-            #         desired_pos = np.array([target_xy[0], target_xy[1], target_z])
-            #         self.desired_positions[drone] = desired_pos
-            #         self.desired_yaws[drone] = 0.0
-            #         z_error = abs(current_z - target_z)
-
-            #         if z_error < 0.1:
-            #             self.get_logger().info(f"{drone} landed. Sending landing command.")
-            #             self.send_landing_command(drone)
-
+            #         # Wait 5 seconds before moving to next drone
+            #         if current_time - self.phase_start_time > 5.0:
             #             self.landing_index += 1
             #             self.landing_subphase = 0
             #             self.phase_start_time = current_time
 
             #             if self.landing_index >= len(self.landing_order):
-            #                 self.get_logger().info("Phase 10 complete: All drones landed.")
+            #                 self.get_logger().info("Phase 3 complete: All drones received landing command.")
             #                 del self.landing_index
             #                 del self.landing_order
             #                 del self.landing_subphase
+            #                 self.phase += 1  # or stop here if this is the final phase
 
 
+            # Back to base version
+            elif self.phase == 3:
+                if not hasattr(self, 'landing_index'):
+                    self.landing_order = ['Alpha', 'Bravo', 'Charlie']
+                    self.landing_index = 0
+                    self.phase_start_time = current_time
+                    self.landing_subphase = 0  # 0 = go to XY, 1 = land
+                    self.get_logger().info("Phase 3 initiated: Sequential landing starting.")
+            
+                drone = self.landing_order[self.landing_index]
+                target_xy = self.initial_positions[drone][:2]
+                current_pos = self.rigid_body_data[drone]
+                current_z = current_pos[2]
+            
+                if self.landing_subphase == 0:
+                    # Step 1: Go to initial X, Y and maintain current Z
+                    desired_pos = np.array([target_xy[0], target_xy[1], current_z])
+                    self.desired_positions[drone] = desired_pos
+                    self.desired_yaws[drone] = 0.0
+            
+                    xy_error = np.linalg.norm(current_pos[:2] - target_xy)
+                    if xy_error < 0.1:
+                        self.get_logger().info(f"{drone} reached XY target. Sending land command.")
+                        self.send_landing_command(drone)
+                        self.landing_subphase = 1
+                        self.phase_start_time = current_time
+            
+                elif self.landing_subphase == 1:
+                    # Step 2: Wait for a few seconds to allow landing
+                    if current_time - self.phase_start_time > 5.0:
+                        self.landing_index += 1
+                        self.landing_subphase = 0
+                        self.phase_start_time = current_time
+            
+                        if self.landing_index >= len(self.landing_order):
+                            self.get_logger().info("Phase 3 complete: All drones sent landing command.")
+                            del self.landing_index
+                            del self.landing_order
+                            del self.landing_subphase
+                            self.phase += 1  # or stop
 
         self.publish_mission_phase()
 
