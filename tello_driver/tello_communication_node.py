@@ -50,6 +50,12 @@ class TelloCommunicationNode(Node):
         drone.streamoff()
         drone.takeoff()
 
+        # Initialize rc controls
+        drone.rc_control_x = 0
+        drone.rc_control_y = 0
+        drone.rc_control_z = 0
+        drone.rc_control_yaw = 0
+
     def send_velocity_command(self, drone):
         #self.get_logger().info(f'Sending velocity command: vx={drone.rc_control_x}, vy={drone.rc_control_y}, vz={drone.rc_control_z}, yaw={drone.rc_control_yaw}')
         drone.send_rc_control(int(drone.rc_control_x), int(drone.rc_control_y), int(drone.rc_control_z), int(drone.rc_control_yaw))
