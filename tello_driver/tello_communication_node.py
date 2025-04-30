@@ -1,151 +1,165 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Float64
-from cv_bridge import CvBridge
-from djitellopy import Tello
-import threading
-import time
-import cv2
-import logging
-from std_msgs.msg import Bool
+from rclpy.node       import Node
+from rclpy.qos        import qos_profile_sensor_data
+from std_msgs.msg     import Float64, Bool
+from sensor_msgs.msg  import Image
+
+import threading, time, logging, cv2
+from cv_bridge        import CvBridge
+from djitellopy       import TelloSwarm
+
 
 class TelloCommunicationNode(Node):
+    """
+    One ROS 2 node that:
+      • builds a TelloSwarm from the given IP list
+      • changes the video-stream UDP port of each drone (so streams don’t clash)
+      • publishes velocity / landing commands (as before)
+      • publishes each camera feed on  <drone>/image_raw   (sensor_msgs/Image)
+    """
+    BASE_VS_PORT = 11111          # first UDP port; each next drone gets +10
+
+    # ──────────────────────────────────────────────────────────────────────────
     def __init__(self):
         super().__init__('tello_communication_node')
-        self.drones = {
-            'Alpha': Tello('10.42.0.95'),
-            'Bravo': Tello('10.42.0.97'),
-            'Charlie': Tello('10.42.0.204')
-        }
-        # self.drones = {'Alpha': Tello('10.42.0.95')}
+
+        # ─── Swarm initialisation ───────────────────────────────────────────
+        self.names = ['Alpha', 'Bravo', 'Charlie']
+        ips        = ['10.42.0.95', '10.42.0.97', '10.42.0.204']
+
+        self.swarm  = TelloSwarm.fromIps(ips)
+        self.swarm.connect()                                   # broadcast connect
         self.bridge = CvBridge()
-        self.initialize_drones()
+        self.image_pubs = {}                                   # name -> publisher
 
-        for drone_name in self.drones:
+        def per_drone_setup(i: int, tello):
+            """Runs in parallel for every Tello during initialisation"""
+            port = self.BASE_VS_PORT + i * 10                  # 11111 / 11121 / 11131 …
+            tello.streamoff()
+            tello.change_vs_udp(port)                          # custom port
+            tello.streamon()                                   # turn camera back on
+            tello.takeoff()
+
+            # attach RC placeholders so we can mutate them later
+            tello.rc_control_x = tello.rc_control_y = \
+            tello.rc_control_z = tello.rc_control_yaw = 0
+
+            # make ROS publisher & start capture thread
+            name  = self.names[i]
+            topic = f'{name}/image_raw'
+            self.image_pubs[name] = self.create_publisher(
+                                        Image, topic,
+                                        qos_profile_sensor_data)
+            threading.Thread(target=self._video_loop,
+                             args=(name, port),
+                             daemon=True).start()
+
+        self.swarm.parallel(per_drone_setup)                   # run setup on all drones
+        self.drones = {n: self.swarm.tellos[i]                 # handy lookup
+                       for i, n in enumerate(self.names)}
+
+        # ─── ROS 2 subscriptions (same topics as before) ────────────────────
+        for drone in self.names:
             for axis in ['Vel_x', 'Vel_y', 'Vel_z', 'AngVel_yaw']:
-                topic_name = f'{drone_name}_cmd_{axis}'
-                self.get_logger().info(f'Subscribing to topic: {topic_name}')
-                self.create_subscription(Float64, topic_name, 
-                                         self.create_velocity_callback(drone_name, axis), 10)
+                topic = f'{drone}_cmd_{axis}'
+                self.create_subscription(Float64, topic,
+                                         self._make_velocity_cb(drone, axis), 10)
 
-        for drone_name in self.drones:
-            land_topic = f'{drone_name}_land'
-            self.get_logger().info(f'Subscribing to topic: {land_topic}')
-            self.create_subscription(Bool, land_topic, self.create_landing_callback(drone_name), 10)
-            
-        rclpy.get_default_context().on_shutdown(self.on_shutdown)
-        threading.Thread(target=self.shutdown_listener).start()
+            land_topic = f'{drone}_land'
+            self.create_subscription(Bool, land_topic,
+                                     self._make_land_cb(drone), 10)
+
         logging.getLogger('djitellopy').setLevel(logging.WARNING)
+        rclpy.get_default_context().on_shutdown(self.on_shutdown)
+        self.get_logger().info('TelloCommunicationNode initialised.')
 
-    def initialize_drones(self):
-        threads = [threading.Thread(target=self.setup_drone, args=(drone_name,)) for drone_name in self.drones]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+    # ─── Video capture worker ────────────────────────────────────────────────
+    def _video_loop(self, name: str, port: int):
+        """
+        Opens an ffmpeg-backed UDP stream and publishes frames until shutdown.
+        Runs in its own daemon thread per drone.
+        """
+        self.get_logger().info(f'[{name}] opening video stream on UDP {port}')
+        cap = cv2.VideoCapture(f'udp://0.0.0.0:{port}', cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)            # keep latency low
+        pub = self.image_pubs[name]
 
-    def setup_drone(self, drone_name):
-        drone = self.drones[drone_name]
-        drone.connect()
-        drone.streamoff()
-        drone.takeoff()
+        while cap.isOpened() and rclpy.ok():
+            ok, frame = cap.read()
+            if not ok:
+                self.get_logger().warn(f'[{name}] dropped frame'); continue
+            msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+            msg.header.stamp = self.get_clock().now().to_msg()
+            pub.publish(msg)
+        cap.release()
+        self.get_logger().info(f'[{name}] video thread ended.')
 
-        # Initialize rc controls
-        drone.rc_control_x = 0
-        drone.rc_control_y = 0
-        drone.rc_control_z = 0
-        drone.rc_control_yaw = 0
+    # ─── Velocity handling ───────────────────────────────────────────────────
+    def _make_velocity_cb(self, name, axis):
+        return lambda msg: self._handle_velocity(msg, name, axis)
 
-    def send_velocity_command(self, drone):
-        #self.get_logger().info(f'Sending velocity command: vx={drone.rc_control_x}, vy={drone.rc_control_y}, vz={drone.rc_control_z}, yaw={drone.rc_control_yaw}')
-        drone.send_rc_control(int(drone.rc_control_x), int(drone.rc_control_y), int(drone.rc_control_z), int(drone.rc_control_yaw))
+    def _handle_velocity(self, msg, name, axis):
+        drone = self.drones[name]
+        scale, limit = 100.0, 100
+        val = max(min(msg.data * scale, limit), -limit)
 
-    def handle_velocity(self, msg, drone_name, axis):
-        #self.get_logger().info(f'Received velocity message: {msg.data} for drone: {drone_name}, axis: {axis}')
-        drone = self.drones[drone_name]
+        if   axis == 'Vel_x':        drone.rc_control_x   = val
+        elif axis == 'Vel_y':        drone.rc_control_y   = val
+        elif axis == 'Vel_z':        drone.rc_control_z   = val
+        elif axis == 'AngVel_yaw':   drone.rc_control_yaw = val
 
-        scale_factor = 100.0  # Scale the velocity commands to be within -100 to 100
-        limit = 100
-        if axis == 'Vel_x':
-            drone.rc_control_x = max(min(msg.data * scale_factor, limit), -limit)
-        elif axis == 'Vel_y':
-            drone.rc_control_y = max(min(msg.data * scale_factor, limit), -limit)
-        elif axis == 'Vel_z':
-            drone.rc_control_z = max(min(msg.data * scale_factor, limit), -limit)
-        elif axis == 'AngVel_yaw':
-            drone.rc_control_yaw = max(min(msg.data * scale_factor, limit), -limit)
+        threading.Thread(target=lambda:
+            drone.send_rc_control(int(drone.rc_control_x),
+                                  int(drone.rc_control_y),
+                                  int(drone.rc_control_z),
+                                  int(drone.rc_control_yaw)),
+            daemon=True).start()
 
-        threading.Thread(target=self.send_velocity_command, args=(drone,)).start()
+    # ─── Landing handling ────────────────────────────────────────────────────
+    def _make_land_cb(self, name):
+        return lambda msg: self._handle_land(msg, name)
 
-    def create_velocity_callback(self, drone_name, axis):
-        return lambda msg: self.handle_velocity(msg, drone_name, axis)
-
-    def land_all_drones(self):
-        self.get_logger().info('Landing all drones now...')
-        for drone_name in self.drones:
-            success = self.safe_land(drone_name)
-            if not success:
-                self.get_logger().warn(f"[{drone_name}] Manual intervention may be required.")
-
-    def create_landing_callback(self, drone_name):
-        return lambda msg: self.handle_landing(msg, drone_name)
-
-    def handle_landing(self, msg, drone_name):
+    def _handle_land(self, msg, name):
         if msg.data:
-            self.get_logger().info(f"[{drone_name}] Landing command received. Initiating safe landing...")
-            threading.Thread(target=self.safe_land, args=(drone_name,)).start()
+            self.get_logger().info(f'[{name}] Landing…')
+            threading.Thread(target=self._safe_land, args=(name,),
+                             daemon=True).start()
 
-    def safe_land(self, drone_name, max_retries=3):
-        drone = self.drones[drone_name]
-        self.get_logger().info(f"[{drone_name}] Initiating safe landing...")
-    
-        try:
-            # Step 1: Stabilize with rc 0 0 0 0
-            for _ in range(3):
-                drone.send_rc_control(0, 0, 0, 0)
-                time.sleep(0.3)
-    
-            # Step 2: Retry landing with exponential backoff
-            for i in range(max_retries):
-                try:
-                    self.get_logger().info(f"[{drone_name}] Sending land command (attempt {i+1})...")
-                    drone.land()
-                    self.get_logger().info(f"[{drone_name}] Landed successfully.")
-                    self.get_logger().info(f"[{drone_name}] Shutting down connection.")
-                    drone.end()
-                    return True
-    
-                except Exception as e:
-                    self.get_logger().warn(f"[{drone_name}] Land attempt {i+1} failed: {e}")
-                    time.sleep(1.5 * (i + 1))  # backoff
-    
-            self.get_logger().error(f"[{drone_name}] FAILED to land after {max_retries} attempts.")
-            return False
-    
-        except Exception as e:
-            self.get_logger().error(f"[{drone_name}] Exception in safe_land: {e}")
-            return False
+    def _safe_land(self, name, retries=3):
+        drone = self.drones[name]
+        for _ in range(3):                               # stabilise first
+            drone.send_rc_control(0, 0, 0, 0); time.sleep(0.3)
+        for i in range(retries):
+            try:
+                drone.land(); return
+            except Exception as e:
+                self.get_logger().warn(f'[{name}] land retry {i+1}: {e}')
+                time.sleep(1.5 * (i + 1))
+        self.get_logger().error(f'[{name}] FAILED to land – manual intervention!')
 
+    # ─── Shutdown ────────────────────────────────────────────────────────────
     def on_shutdown(self):
-        self.get_logger().info('Shutting down node, landing all drones...')
-        self.land_all_drones()
-        time.sleep(10)  # Ensure there is enough time to land all drones
-        self.get_logger().info('All drones landed and sockets closed.')
+        self.get_logger().info('ROS 2 shutdown – landing swarm…')
+        self.swarm.sequential(lambda i, t: t.land())
+        self.swarm.end()
+        self.get_logger().info('All drones down; cleanup complete.')
 
-    def shutdown_listener(self):
-        while rclpy.ok():
-            time.sleep(1)  # Keep the thread alive
 
+# ─── main ────────────────────────────────────────────────────────────────────
 def main(args=None):
     rclpy.init(args=args)
     node = TelloCommunicationNode()
     try:
         rclpy.spin(node)
     finally:
-        if rclpy.ok():
+        if rclpy.ok():                                  # if ctrl-C not hit twice
             node.on_shutdown()
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
