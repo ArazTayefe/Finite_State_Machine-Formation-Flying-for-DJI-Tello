@@ -6,7 +6,8 @@ from rclpy.node import Node
 from rclpy.qos  import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Float64, Bool
 from sensor_msgs.msg import Image
-
+import subprocess
+import numpy as np
 import threading, time, logging, cv2
 from cv_bridge  import CvBridge
 from djitellopy import TelloSwarm
@@ -39,7 +40,7 @@ class TelloCommunicationNode(Node):
             tello.change_vs_udp(port)
             tello.streamon()
             time.sleep(0.5)                        # let first key-frame arrive
-            # tello.takeoff()
+            tello.takeoff()
 
             # rc placeholders
             tello.rc_control_x = tello.rc_control_y = \
@@ -48,6 +49,7 @@ class TelloCommunicationNode(Node):
             # ROS publisher & capture thread
             name  = self.names[i]
             topic = f'{name}/image_raw'
+            # topic = '/camera'
             self.image_pubs[name] = self.create_publisher(Image, topic, img_qos)
             threading.Thread(target=self._video_loop,
                              args=(name, port),
@@ -73,33 +75,32 @@ class TelloCommunicationNode(Node):
 
     # ─── Video grab & publish ───────────────────────────────────────────
     def _video_loop(self, name: str, port: int):
-        url = (f'udp://@0.0.0.0:{port}'
-               '?overrun_nonfatal=1&fifo_size=5000000&listen=1')
-        self.get_logger().info(f'[{name}] opening video stream: {url}')
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        width, height = 640, 480  # width x height
+        cmd = [
+            'ffmpeg',
+            '-i', f'udp://@0.0.0.0:{port}',
+            '-loglevel', 'quiet',
+            '-f', 'rawvideo',
+            '-pix_fmt', 'rgb24',           # Output RGB frames
+            '-s', '640x480',               # Output size 640x480 (width x height)
+            '-'
+        ]
 
-        pub      = self.image_pubs[name]
-        got_frame = False
-        start_t   = self.get_clock().now().nanoseconds
+        self.get_logger().info(f'[{name}] opening video stream via ffmpeg.')
+        pipe = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=10**8)
+
+        pub = self.image_pubs[name]
 
         while rclpy.ok():
-            ok, frame = cap.read()
-            if not ok:
-                # after 5 s without a frame, complain once
-                if (not got_frame and
-                    self.get_clock().now().nanoseconds - start_t > 5e9):
-                    self.get_logger().error(
-                        f'[{name}] No video packets received on UDP {port}. '
-                        'Check:\n  • Wi-Fi NIC / IP routing\n  • Firewall\n  • '
-                        'Drone really streaming (ffplay udp://@0.0.0.0:PORT)')
-                    got_frame = True  # prevent spamming
-                time.sleep(0.02)
+            raw_frame = pipe.stdout.read(width * height * 3)
+
+            if len(raw_frame) != width * height * 3:
                 continue
 
-            got_frame = True
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)          # NEW
-            msg   = self.bridge.cv2_to_imgmsg(frame, encoding='rgb8')  # CHANGED
+            frame = np.frombuffer(raw_frame, np.uint8).reshape((height, width, 3))
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+            msg.header.frame_id = "camera"
             msg.header.stamp = self.get_clock().now().to_msg()
             pub.publish(msg)
 
