@@ -53,15 +53,19 @@ ros2 lifecycle set /mocap4r2_optitrack_driver_node activate
 For more information, visit the [mocap4r2](https://github.com/MOCAP4ROS2-Project/mocap4ros2_optitrack) GitHub repository.
 
 ## Run the ROS2 Node
-Clone the repository:
-```
-git clone git@github.com:NickTayefe/DJI-Tello-EDU.git
-cd DJI-Tello-EDU
-```
-Change your directory to your ROS2 workspace on the local computer (e.g., Raspberry Pi) and build the package:
+
+Change your directory to your ROS2 workspace on the local computer:
 
 ```
-cd ~/'your_ros2_workspace'
+cd ~/'your_ros2_workspace'/src
+```
+
+Clone the repository:
+
+```
+git clone https://github.com/ArazTayefe/Finite_State_Machine-Formation-Flying-for-DJI-Tello
+cd ../
+colcon build --packages-select tello_driver
 source install/setup.bash
 ```
 Launch the node:
