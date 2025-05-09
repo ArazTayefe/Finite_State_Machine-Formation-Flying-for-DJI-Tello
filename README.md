@@ -58,22 +58,23 @@ Clone the repository:
 git clone git@github.com:NickTayefe/DJI-Tello-EDU.git
 cd DJI-Tello-EDU
 ```
-Change your directory to your ROS2 workspace on the local computer (e.g., Raspberry Pi) and run the communication node:
+Change your directory to your ROS2 workspace on the local computer (e.g., Raspberry Pi) and build the package:
+
 ```
 cd ~/'your_ros2_workspace'
-colcon build --packages-select tello_driver
 source install/setup.bash
+```
+Launch the node:
+
+```
+ros2 launch tello_driver tello_launch.py
+```
+
+To run the communication and control node separately:
+
+```
 ros2 run tello_communication_node
-
-```
-Change your directory to your ROS2 workspace on the remote computer (e.g., EDGE PC) and run the control node:
-
-```
-cd ~/'your_ros2_workspace'
-colcon build --packages-select tello_driver
-source install/setup.bash
 ros2 run control_node
-
 ```
 
 ## Issues and Contributions
