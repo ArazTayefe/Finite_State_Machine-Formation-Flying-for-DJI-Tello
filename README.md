@@ -77,8 +77,8 @@ ros2 launch tello_driver tello_launch.py
 To run the communication and control node separately:
 
 ```
-ros2 run tello_communication_node
-ros2 run control_node
+ros2 run tello_driver tello_communication_node
+ros2 run tello_driver control_node
 ```
 
 ## Issues and Contributions
