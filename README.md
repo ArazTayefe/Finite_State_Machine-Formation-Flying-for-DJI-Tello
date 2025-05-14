@@ -87,9 +87,4 @@ If you encounter any issues, please open an issue on GitHub. Contributions are w
 
 This code is tested on Ubuntu 22 and ROS2 Humble.
 
-## License
-
-This project is licensed under the MIT License.
-=======
-# Finite_State_Machine-Formation-Flying-for-DJI-Tello
 
